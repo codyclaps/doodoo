@@ -1,0 +1,30 @@
+variables:
+  GITLAB_URL: "https://gitlab.example.com"  # Replace with your GitLab instance URL
+  ELLIS_ISLAND_PROJECT_ID: "<ellis_island_project_id>"  # Replace with Ellis Island project ID
+
+stages:
+  - check
+
+check_notify_updates:
+  stage: check
+  image: alpine:latest
+  before_script:
+    - apk add --no-cache git jq curl
+  script:
+    - |
+      LATEST_TAG=$(curl -s https://api.github.com/repos/projectdiscovery/notify/releases/latest | jq -r .tag_name)
+      CURRENT_TAG=$(curl -s --header "PRIVATE-TOKEN: $INGRESS_ACCESS_TOKEN" "$GITLAB_URL/api/v4/projects/$CI_PROJECT_ID/repository/tags" | jq -r '.[0].name' | sort -V | tail -n1 || echo "v0.0.0")
+      if [ "$LATEST_TAG" != "$CURRENT_TAG" ]; then
+        echo "New version detected: $LATEST_TAG"
+        BRANCH_NAME="update-to-$LATEST_TAG"
+        git checkout -b $BRANCH_NAME
+        git remote add github https://github.com/projectdiscovery/notify.git
+        git pull github $LATEST_TAG
+        git push origin $BRANCH_NAME
+        curl --request POST --header "PRIVATE-TOKEN: $INGRESS_ACCESS_TOKEN" "$GITLAB_URL/api/v4/projects/$CI_PROJECT_ID/merge_requests?source_branch=$BRANCH_NAME&target_branch=main&title=Update%20Notify%20to%20$LATEST_TAG&description=New%20version%20$LATEST_TAG%20available.%20Please%20review%20in%20Ellis%20Island."
+        curl --request POST --header "PRIVATE-TOKEN: $INGRESS_ACCESS_TOKEN" "$GITLAB_URL/api/v4/projects/$ELLIS_ISLAND_PROJECT_ID/issues?title=Review%20Notify%20v$LATEST_TAG&description=New%20version%20$LATEST_TAG%20of%20Notify%20available%20in%20Ingress.%20Please%20run%20Ellis%20Island%20pipeline%20to%20review.%20MR:%20$GITLAB_URL/Poseidon/Ingress/Notify/-/merge_requests"
+      else
+        echo "No new version available."
+      fi
+  rules:
+    - if: '$CI_PIPELINE_SOURCE == "trigger"'
