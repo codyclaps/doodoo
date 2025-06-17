@@ -3,10 +3,6 @@ variables:
   TOOLBELT_PROJECT_ID: "5977"
   ELLIS_ISLAND_PROJECT_ID: "3414"
   GITLAB_URL: "https://gitlab.health.mil/"
-  HARBOR_URL: "https://harbor.health.mil/"
-  TRUFFLEHOG_IMAGE: "https://gitlab.health.mil/public-images/pipeline-tools/trufflehog.git"
-  TRIVY_IMAGE: "https://gitlab.health.mil/public-images/pipeline-tools/trivy.git"
-  SYFT_IMAGE: "https://gitlab.health.mil/public-images/pipeline-tools/syft.git"
 
 stages:
   - pull
@@ -14,37 +10,57 @@ stages:
   - generate_artifacts
   - trigger_validation
   - push
-  - store_artifacts
 
 pull_tools:
   stage: pull
   image: alpine:latest
   before_script:
-    - apk add --no-cache git curl
+    - apk add --no-cache git curl python3 py3-pip go podman
+    - pip install --no-cache-dir nuclei httpx checkov trufflehog
+    - curl -sSfL https://github.com/projectdiscovery/notify/releases/latest/download/notify_Linux_amd64.tar.gz | tar -xz -C /usr/local/bin
+    - curl -sSfL https://github.com/anchore/grype/releases/latest/download/grype_Linux_x86_64.tar.gz | tar -xz -C /usr/local/bin
+    - curl -sSfL https://github.com/aquasecurity/trivy/releases/latest/download/trivy_Linux_64bit.tar.gz | tar -xz -C /usr/local/bin
+    - curl -sSfL https://github.com/anchore/syft/releases/latest/download/syft_Linux_x86_64.tar.gz | tar -xz -C /usr/local/bin
+    - curl -sSfL https://github.com/CycloneDX/cyclonedx-cli/releases/latest/download/cyclonedx-linux-x64.tar.gz | tar -xz -C /usr/local/bin
+    - curl -sSfL https://github.com/OpenSCAP/openscap-podman/releases/latest/download/openscap-podman_Linux_x86_64.tar.gz | tar -xz -C /usr/local/bin
+    - apk add --no-cache clamav
   script:
     - echo "Pulling Open-Source Tools"
-    - mkdir -p Ingest-Artifacts
-    - git clone https://github.com/projectdiscovery/nuclei.git Ingest-Artifacts/nuclei
-    - ls -la Ingest-Artifacts
+    - mkdir -p tools
+    - git clone https://github.com/projectdiscovery/nuclei.git tools/nuclei || true
+    - git clone https://github.com/projectdiscovery/notify.git tools/notify || true
+    - git clone https://github.com/anchore/grype.git tools/grype || true
+    - git clone https://github.com/aquasecurity/trivy.git tools/trivy || true
+    - git clone https://github.com/anchore/syft.git tools/syft || true
+    - git clone https://github.com/CycloneDX/cyclonedx-cli.git tools/cyclonedx-cli || true
+    - git clone https://github.com/encode/httpx.git tools/httpx || true
+    - git clone https://github.com/bridgecrewio/checkov.git tools/checkov || true
+    - git clone https://github.com/trufflesecurity/trufflehog.git tools/trufflehog || true
+    - git clone https://github.com/stackrox/stackrox.git tools/stackrox || true
+    - curl -sSfL https://github.com/OpenSCAP/openscap-podman/releases/latest/download/openscap-podman_Linux_x86_64.tar.gz -o tools/openscap-podman.tar.gz
+    - ls -la tools
   artifacts:
     paths:
-      - Ingest-Artifacts/
+      - tools/
     expire_in: 1 week
   rules:
     - if: '$CI_PIPELINE_SOURCE == "schedule" || $CI_PIPELINE_SOURCE == "web"'
 
 scan_tools:
   stage: scan
-  image: python:3.11-slim
+  image: alpine:latest
   before_script:
-    - pip install trufflehog
-    - apt-get update && apt-get install -y curl
+    - apk add --no-cache python3 py3-pip
+    - pip install --no-cache-dir trufflehog
   script:
     - echo "Scanning tools with TruffleHog for secrets"
     - trufflehog filesystem tools/ --no-verification --json > trufflehog-report.json
+    - echo "Scanning tools with Trivy for vulnerabilities"
+    - trivy fs tools/ --scanners vuln,secret,config --format json > trivy-report.json
   artifacts:
     paths:
       - trufflehog-report.json
+      - trivy-report.json
     expire_in: 1 week
   dependencies:
     - pull_tools
@@ -53,9 +69,7 @@ scan_tools:
 
 generate_sbom:
   stage: generate_artifacts
-  image: golang:1.21
-  before_script:
-    - curl -sSfL https://raw.githubusercontent.com/anchore/syft/main/install.sh | sh -s -- -b /usr/local/bin
+  image: alpine:latest
   script:
     - echo "Generating SBOM with Syft"
     - syft tools/ -o cyclonedx-json > sbom.json
@@ -70,6 +84,9 @@ generate_sbom:
 
 trigger_ellis_island:
   stage: trigger_validation
+  image: alpine:latest
+  before_script:
+    - apk add --no-cache curl
   script:
     - echo "Triggering Ellis-Island pipeline for comprehensive scanning"
     - curl --request POST --header "PRIVATE-TOKEN: $ELLIS_ISLAND_ACCESS_TOKEN" "$GITLAB_URL/api/v4/projects/$ELLIS_ISLAND_PROJECT_ID/pipeline?ref=main"
@@ -86,8 +103,11 @@ push_to_kvasir:
     - apk add --no-cache curl
   script:
     - echo "Pushing artifacts to Kvasir"
-    - curl --request POST --header "PRIVATE-TOKEN: $KVASIR_ACCESS_TOKEN" "$GITLAB_URL/api/v4/projects/$KVASIR_PROJECT_ID/repository/files/sboms%2Fsbom-${CI_PIPELINE_ID}.json" --form "content=$(cat sbom.json | base64)" --form "branch=main" --form "commit_message=Add SBOM for pipeline ${CI_PIPELINE_ID}"
-    - curl --request POST --header "PRIVATE-TOKEN: $KVASIR_ACCESS_TOKEN" "$GITLAB_URL/api/v4/projects/$KVASIR_PROJECT_ID/repository/files/audit%2Ftrufflehog-${CI_PIPELINE_ID}.json" --form "content=$(cat trufflehog-report.json | base64)" --form "branch=main" --form "commit_message=Add TruffleHog report for pipeline ${CI_PIPELINE_ID}"
+    - tar -czf tools.tar.gz tools/
+    - curl --request POST --header "PRIVATE-TOKEN: $KVASIR_ACCESS_TOKEN" "$GITLAB_URL/api/v4/projects/$KVASIR_PROJECT_ID/repository/files/artifacts%2Ftools-${CI_PIPELINE_ID}.tar.gz" --form "content=$(base64 tools.tar.gz)" --form "branch=main" --form "commit_message=Add tools artifact for pipeline ${CI_PIPELINE_ID}"
+    - curl --request POST --header "PRIVATE-TOKEN: $KVASIR_ACCESS_TOKEN" "$GITLAB_URL/api/v4/projects/$KVASIR_PROJECT_ID/repository/files/sboms%2Fsbom-${CI_PIPELINE_ID}.json" --form "content=$(base64 sbom.json)" --form "branch=main" --form "commit_message=Add SBOM for pipeline ${CI_PIPELINE_ID}"
+    - curl --request POST --header "PRIVATE-TOKEN: $KVASIR_ACCESS_TOKEN" "$GITLAB_URL/api/v4/projects/$KVASIR_PROJECT_ID/repository/files/audit%2Ftrufflehog-${CI_PIPELINE_ID}.json" --form "content=$(base64 trufflehog-report.json)" --form "branch=main" --form "commit_message=Add TruffleHog report for pipeline ${CI_PIPELINE_ID}"
+    - curl --request POST --header "PRIVATE-TOKEN: $KVASIR_ACCESS_TOKEN" "$GITLAB_URL/api/v4/projects/$KVASIR_PROJECT_ID/repository/files/audit%2Ftrivy-${CI_PIPELINE_ID}.json" --form "content=$(base64 trivy-report.json)" --form "branch=main" --form "commit_message=Add Trivy report for pipeline ${CI_PIPELINE_ID}"
   dependencies:
     - scan_tools
     - generate_sbom
@@ -101,8 +121,8 @@ push_to_toolbelt:
     - apk add --no-cache curl
   script:
     - echo "Pushing approved tools to Toolbelt"
-    - tar -czf tools.tar.gz tools/
-    - curl --request POST --header "PRIVATE-TOKEN: $TOOLBELT_ACCESS_TOKEN" "$GITLAB_URL/api/v4/projects/$TOOLBELT_PROJECT_ID/repository/files/tools%2Fapproved-tools-${CI_PIPELINE_ID}.tar.gz" --form "content=$(cat tools.tar.gz | base64)" --form "branch=main" --form "commit_message=Add approved tools for pipeline ${CI_PIPELINE_ID}"
+    - tar -czf approved-tools.tar.gz tools/
+    - curl --request POST --header "PRIVATE-TOKEN: $TOOLBELT_ACCESS_TOKEN" "$GITLAB_URL/api/v4/projects/$TOOLBELT_PROJECT_ID/repository/files/tools%2Fapproved-tools-${CI_PIPELINE_ID}.tar.gz" --form "content=$(base64 approved-tools.tar.gz)" --form "branch=main" --form "commit_message=Add approved tools for pipeline ${CI_PIPELINE_ID}"
   dependencies:
     - trigger_ellis_island
   rules:
