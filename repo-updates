@@ -1,8 +1,12 @@
 variables:
-  KVASIR_PROJECT_ID: "<kvasir_project_id>"
-  TOOLBELT_PROJECT_ID: "<toolbelt_project_id>"
-  ELLIS_ISLAND_PROJECT_ID: "<ellis-island_project_id>"
-  GITLAB_URL: "https://gitlab.example.com"
+  KVASIR_PROJECT_ID: "3384"
+  TOOLBELT_PROJECT_ID: "5977"
+  ELLIS_ISLAND_PROJECT_ID: "3414"
+  GITLAB_URL: "https://gitlab.health.mil/"
+  HARBOR_URL: "https://harbor.health.mil/"
+  TRUFFLEHOG_IMAGE: "https://gitlab.health.mil/public-images/pipeline-tools/trufflehog.git"
+  TRIVY_IMAGE: "https://gitlab.health.mil/public-images/pipeline-tools/trivy.git"
+  SYFT_IMAGE: "https://gitlab.health.mil/public-images/pipeline-tools/syft.git"
 
 stages:
   - pull
@@ -10,6 +14,7 @@ stages:
   - generate_artifacts
   - trigger_validation
   - push
+  - store_artifacts
 
 pull_tools:
   stage: pull
@@ -17,16 +22,13 @@ pull_tools:
   before_script:
     - apk add --no-cache git curl
   script:
-    - echo "Pulling open-source tools"
-    - mkdir -p tools
-    - git clone https://github.com/projectdiscovery/nuclei.git tools/nuclei
-    - git clone https://github.com/aquasecurity/trivy.git tools/trivy
-    - git clone https://github.com/anchore/syft.git tools/syft
-    - git clone https://github.com/trufflesecurity/trufflehog.git tools/trufflehog
-    - ls -la tools
+    - echo "Pulling Open-Source Tools"
+    - mkdir -p Ingest-Artifacts
+    - git clone https://github.com/projectdiscovery/nuclei.git Ingest-Artifacts/nuclei
+    - ls -la Ingest-Artifacts
   artifacts:
     paths:
-      - tools/
+      - Ingest-Artifacts/
     expire_in: 1 week
   rules:
     - if: '$CI_PIPELINE_SOURCE == "schedule" || $CI_PIPELINE_SOURCE == "web"'
