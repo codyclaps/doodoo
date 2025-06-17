@@ -15,15 +15,16 @@ pull_tools:
   stage: pull
   image: alpine:latest
   before_script:
-    - apk add --no-cache git curl python3 py3-pip go podman
-    - pip install --no-cache-dir nuclei httpx checkov trufflehog
-    - curl -sSfL https://github.com/projectdiscovery/notify/releases/latest/download/notify_Linux_amd64.tar.gz | tar -xz -C /usr/local/bin
-    - curl -sSfL https://github.com/anchore/grype/releases/latest/download/grype_Linux_x86_64.tar.gz | tar -xz -C /usr/local/bin
-    - curl -sSfL https://github.com/aquasecurity/trivy/releases/latest/download/trivy_Linux_64bit.tar.gz | tar -xz -C /usr/local/bin
-    - curl -sSfL https://github.com/anchore/syft/releases/latest/download/syft_Linux_x86_64.tar.gz | tar -xz -C /usr/local/bin
-    - curl -sSfL https://github.com/CycloneDX/cyclonedx-cli/releases/latest/download/cyclonedx-linux-x64.tar.gz | tar -xz -C /usr/local/bin
-    - curl -sSfL https://github.com/OpenSCAP/openscap-podman/releases/latest/download/openscap-podman_Linux_x86_64.tar.gz | tar -xz -C /usr/local/bin
-    - apk add --no-cache clamav
+    - |
+      apk add --no-cache git curl python3 py3-pip go podman
+      pip install --no-cache-dir nuclei httpx checkov trufflehog
+      curl -sSfL https://github.com/projectdiscovery/notify/releases/latest/download/notify_Linux_amd64.tar.gz | tar -xz -C /usr/local/bin
+      curl -sSfL https://github.com/anchore/grype/releases/latest/download/grype_Linux_x86_64.tar.gz | tar -xz -C /usr/local/bin
+      curl -sSfL https://github.com/aquasecurity/trivy/releases/latest/download/trivy_Linux_64bit.tar.gz | tar -xz -C /usr/local/bin
+      curl -sSfL https://github.com/anchore/syft/releases/latest/download/syft_Linux_x86_64.tar.gz | tar -xz -C /usr/local/bin
+      curl -sSfL https://github.com/CycloneDX/cyclonedx-cli/releases/latest/download/cyclonedx-linux-x64.tar.gz | tar -xz -C /usr/local/bin
+      curl -sSfL https://github.com/OpenSCAP/openscap-podman/releases/latest/download/openscap-podman_Linux_x86_64.tar.gz | tar -xz -C /usr/local/bin
+      apk add --no-cache clamav
   script:
     - echo "Pulling Open-Source Tools"
     - mkdir -p tools
@@ -41,7 +42,7 @@ pull_tools:
     - ls -la tools
   artifacts:
     paths:
-      - tools/
+    - tools/
     expire_in: 1 week
   rules:
     - if: '$CI_PIPELINE_SOURCE == "schedule" || $CI_PIPELINE_SOURCE == "web"'
