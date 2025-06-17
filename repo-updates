@@ -1,44 +1,28 @@
 variables:
-  HARBOR_URL: "https://harbor.example.com"
-  HARBOR_REGISTRY: "harbor.example.com/poseidon/toolbelt"
-  TOOLBELT_PROJECT_ID: "<toolbelt_project_id>"
-  TOOL_VALIDATION_PROJECT_ID: "<tool-validation_project_id>"
   KVASIR_PROJECT_ID: "<kvasir_project_id>"
+  TOOLBELT_PROJECT_ID: "<toolbelt_project_id>"
+  ELLIS_ISLAND_PROJECT_ID: "<ellis-island_project_id>"
   GITLAB_URL: "https://gitlab.example.com"
 
 stages:
   - pull
   - scan
   - generate_artifacts
-  - validate
+  - trigger_validation
   - push
-  - compliance
 
 pull_tools:
   stage: pull
   image: alpine:latest
   before_script:
-    - apk add --no-cache git curl jq
+    - apk add --no-cache git curl
   script:
     - echo "Pulling open-source tools"
     - mkdir -p tools
-    - |
-      # Check and pull Nuclei updates
-      LATEST_NUCLEI_TAG=$(curl -s https://api.github.com/repos/projectdiscovery/nuclei/releases/latest | jq -r .tag_name)
-      CURRENT_NUCLEI_TAG=$(cat tools/nuclei_version.txt 2>/dev/null || echo "v0.0.0")
-      if [ "$LATEST_NUCLEI_TAG" != "$CURRENT_NUCLEI_TAG" ]; then
-        echo "New Nuclei version detected: $LATEST_NUCLEI_TAG"
-        git clone https://github.com/projectdiscovery/nuclei.git tools/nuclei
-        echo "$LATEST_NUCLEI_TAG" > tools/nuclei_version.txt
-      else
-        echo "No new Nuclei version available."
-      fi
-    - git clone https://github.com/projectdiscovery/notify.git tools/notify
+    - git clone https://github.com/projectdiscovery/nuclei.git tools/nuclei
     - git clone https://github.com/aquasecurity/trivy.git tools/trivy
-    - git clone https://github.com/anchore/grype.git tools/grype
     - git clone https://github.com/anchore/syft.git tools/syft
     - git clone https://github.com/trufflesecurity/trufflehog.git tools/trufflehog
-    - git clone https://github.com/encode/httpx.git tools/httpx
     - ls -la tools
   artifacts:
     paths:
@@ -51,16 +35,14 @@ scan_tools:
   stage: scan
   image: python:3.11-slim
   before_script:
+    - pip install trufflehog
     - apt-get update && apt-get install -y curl
-    - pip install trufflehog checkov
   script:
-    - echo "Scanning tools with TruffleHog and Checkov"
-    - trufflehog filesystem tools/ --no-verification > trufflehog-report.txt
-    - checkov -d tools/ --output json > checkov-report.json
+    - echo "Scanning tools with TruffleHog for secrets"
+    - trufflehog filesystem tools/ --no-verification --json > trufflehog-report.json
   artifacts:
     paths:
-      - trufflehog-report.txt
-      - checkov-report.json
+      - trufflehog-report.json
     expire_in: 1 week
   dependencies:
     - pull_tools
@@ -78,22 +60,37 @@ generate_sbom:
   artifacts:
     paths:
       - sbom.json
-    expire_in: 1 month
+    expire_in: 1 week
   dependencies:
     - pull_tools
   rules:
     - if: '$CI_PIPELINE_SOURCE == "schedule" || $CI_PIPELINE_SOURCE == "web"'
 
-trigger_validation:
-  stage: validate
+trigger_ellis_island:
+  stage: trigger_validation
   script:
-    - echo "Triggering validation pipeline in Tool-Validation"
-    - curl --request POST --header "PRIVATE-TOKEN: $TOOL_VALIDATION_ACCESS_TOKEN" "$GITLAB_URL/api/v4/projects/$TOOL_VALIDATION_PROJECT_ID/pipeline?ref=main"
+    - echo "Triggering Ellis-Island pipeline for comprehensive scanning"
+    - curl --request POST --header "PRIVATE-TOKEN: $ELLIS_ISLAND_ACCESS_TOKEN" "$GITLAB_URL/api/v4/projects/$ELLIS_ISLAND_PROJECT_ID/pipeline?ref=main"
   dependencies:
     - scan_tools
     - generate_sbom
   rules:
     - if: '$CI_PIPELINE_SOURCE == "schedule" || $CI_PIPELINE_SOURCE == "web"'
+
+push_to_kvasir:
+  stage: push
+  image: alpine:latest
+  before_script:
+    - apk add --no-cache curl
+  script:
+    - echo "Pushing artifacts to Kvasir"
+    - curl --request POST --header "PRIVATE-TOKEN: $KVASIR_ACCESS_TOKEN" "$GITLAB_URL/api/v4/projects/$KVASIR_PROJECT_ID/repository/files/sboms%2Fsbom-${CI_PIPELINE_ID}.json" --form "content=$(cat sbom.json | base64)" --form "branch=main" --form "commit_message=Add SBOM for pipeline ${CI_PIPELINE_ID}"
+    - curl --request POST --header "PRIVATE-TOKEN: $KVASIR_ACCESS_TOKEN" "$GITLAB_URL/api/v4/projects/$KVASIR_PROJECT_ID/repository/files/audit%2Ftrufflehog-${CI_PIPELINE_ID}.json" --form "content=$(cat trufflehog-report.json | base64)" --form "branch=main" --form "commit_message=Add TruffleHog report for pipeline ${CI_PIPELINE_ID}"
+  dependencies:
+    - scan_tools
+    - generate_sbom
+  rules:
+    - if: '$CI_COMMIT_BRANCH == "main" && $CI_PIPELINE_SOURCE == "merge_request_event"'
 
 push_to_toolbelt:
   stage: push
@@ -102,67 +99,9 @@ push_to_toolbelt:
     - apk add --no-cache curl
   script:
     - echo "Pushing approved tools to Toolbelt"
-    - tar -czf approved-tools.tar.gz tools/
-    - curl --request POST --header "PRIVATE-TOKEN: $TOOLBELT_ACCESS_TOKEN" "$GITLAB_URL/api/v4/projects/$TOOLBELT_PROJECT_ID/repository/files/tools%2Fapproved-tools.tar.gz" --form "content=$(base64 approved-tools.tar.gz)" --form "branch=main" --form "commit_message=Add approved tools"
+    - tar -czf tools.tar.gz tools/
+    - curl --request POST --header "PRIVATE-TOKEN: $TOOLBELT_ACCESS_TOKEN" "$GITLAB_URL/api/v4/projects/$TOOLBELT_PROJECT_ID/repository/files/tools%2Fapproved-tools-${CI_PIPELINE_ID}.tar.gz" --form "content=$(cat tools.tar.gz | base64)" --form "branch=main" --form "commit_message=Add approved tools for pipeline ${CI_PIPELINE_ID}"
   dependencies:
-    - trigger_validation
+    - trigger_ellis_island
   rules:
     - if: '$CI_COMMIT_BRANCH == "main" && $CI_PIPELINE_SOURCE == "merge_request_event"'
-
-push_to_harbor:
-  stage: push
-  image: docker:24.0
-  services:
-    - docker:dind
-  before_script:
-    - docker login -u "$HARBOR_USERNAME" -p "$HARBOR_PASSWORD" $HARBOR_URL
-  script:
-    - echo "Building and pushing container images to Harbor"
-    - docker build -t $HARBOR_REGISTRY/nuclei:latest tools/nuclei
-    - docker push $HARBOR_REGISTRY/nuclei:latest
-    - docker build -t $HARBOR_REGISTRY/trivy:latest tools/trivy
-    - docker push $HARBOR_REGISTRY/trivy:latest
-  dependencies:
-    - trigger_validation
-  rules:
-    - if: '$CI_COMMIT_BRANCH == "main" && $CI_PIPELINE_SOURCE == "merge_request_event"'
-
-store_artifacts_in_kvasir:
-  stage: compliance
-  image: alpine:latest
-  before_script:
-    - apk add --no-cache curl
-  script:
-    - echo "Storing artifacts in Kvasir"
-    - curl --request POST --header "PRIVATE-TOKEN: $KVASIR_ACCESS_TOKEN" "$GITLAB_URL/api/v4/projects/$KVASIR_PROJECT_ID/repository/files/artifacts%2Fsbom.json" --form "content=$(base64 sbom.json)" --form "branch=main" --form "commit_message=Store SBOM"
-    - curl --request POST --header "PRIVATE-TOKEN: $KVASIR_ACCESS_TOKEN" "$GITLAB_URL/api/v4/projects/$KVASIR_PROJECT_ID/repository/files/artifacts%2Ftrufflehog-report.txt" --form "content=$(base64 trufflehog-report.txt)" --form "branch=main" --form "commit_message=Store TruffleHog report"
-    - curl --request POST --header "PRIVATE-TOKEN: $KVASIR_ACCESS_TOKEN" "$GITLAB_URL/api/v4/projects/$KVASIR_PROJECT_ID/repository/files/artifacts%2Fcheckov-report.json" --form "content=$(base64 checkov-report.json)" --form "branch=main" --form "commit_message=Store Checkov report"
-  artifacts:
-    paths:
-      - sbom.json
-      - trufflehog-report.txt
-      - checkov-report.json
-    expire_in: 1 month
-  dependencies:
-    - scan_tools
-    - generate_sbom
-  rules:
-    - if: '$CI_PIPELINE_SOURCE == "schedule" || $CI_PIPELINE_SOURCE == "web"'
-
-generate_compliance_report:
-  stage: compliance
-  image: python:3.11-slim
-  before_script:
-    - pip install cyclonedx-cli
-  script:
-    - echo "Generating OSCAL-compliant report"
-    - cyclonedx-cli convert --input-file sbom.json --output-format json --output-file oscal-report.json
-    - curl --request POST --header "PRIVATE-TOKEN: $KVASIR_ACCESS_TOKEN" "$GITLAB_URL/api/v4/projects/$KVASIR_PROJECT_ID/repository/files/artifacts%2Foscal-report.json" --form "content=$(base64 oscal-report.json)" --form "branch=main" --form "commit_message=Store OSCAL report"
-  artifacts:
-    paths:
-      - oscal-report.json
-    expire_in: 1 month
-  dependencies:
-    - generate_sbom
-  rules:
-    - if: '$CI_PIPELINE_SOURCE == "schedule" || $CI_PIPELINE_SOURCE == "web"'
